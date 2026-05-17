@@ -1,0 +1,100 @@
+version: "3.9"
+
+services:
+  # ── PostgreSQL ──────────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    container_name: servicehub_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: servicehub
+      POSTGRES_PASSWORD: servicehub
+      POSTGRES_DB: servicehub
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U servicehub"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis ───────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: servicehub_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Backend ─────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: servicehub_backend
+    restart: unless-stopped
+    env_file: ./backend/.env
+    environment:
+      FLASK_ENV: production
+      DATABASE_URL: postgresql://servicehub:servicehub@postgres:5432/servicehub
+      REDIS_URL: redis://redis:6379/0
+      UPLOAD_FOLDER: /tmp/uploads
+      CORS_ORIGINS: http://localhost
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - uploads_data:/tmp/uploads
+    ports:
+      - "5000:5000"
+    command: >
+      sh -c "
+        flask db upgrade &&
+        python seed.py &&
+        gunicorn --bind 0.0.0.0:5000 --workers 4 --timeout 120 run:app
+      "
+
+  # ── Celery worker ───────────────────────────────────────────
+  celery:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: servicehub_celery
+    restart: unless-stopped
+    env_file: ./backend/.env
+    environment:
+      FLASK_ENV: production
+      DATABASE_URL: postgresql://servicehub:servicehub@postgres:5432/servicehub
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      - redis
+      - postgres
+    command: celery -A app.tasks.email_tasks.celery_app worker --loglevel=info --concurrency=2
+
+  # ── Frontend ────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: servicehub_frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+
+volumes:
+  postgres_data:
+  redis_data:
+  uploads_data:
